@@ -12,21 +12,35 @@ import (
 )
 
 type Agent struct {
-	OpenAIKey    string
-	OpenAIModel  string
-	SystemPrompt string
-	MaxTokens    int
-	Temperature  float32
-	Tools        []Tool
-	client       *openai.Client
-	ChatHistory  []openai.ChatCompletionMessage
-	log          *slog.Logger
+	openAIKey               string
+	openAIModel             string
+	systemPrompt            string
+	maxTokens               int
+	temperature             float32
+	tools                   []Tool
+	client                  *openai.Client
+	log                     *slog.Logger
+	threadStore             ThreadStore
+	maxAutonomousIterations int
 }
 
 func NewAgent() *Agent {
-	return &Agent{
-		ChatHistory: []openai.ChatCompletionMessage{},
-	}
+	return &Agent{}
+}
+
+// WithThreadStore
+//
+// The thread store is used to store the conversation history.
+// Customize it to your needs, for example, a file store or a database.
+// If not provided, a default in-memory store will be used.
+func (a *Agent) WithThreadStore(store ThreadStore) *Agent {
+	a.threadStore = store
+	return a
+}
+
+func (a *Agent) WithMaxAutonomousIterations(iterations int) *Agent {
+	a.maxAutonomousIterations = iterations
+	return a
 }
 
 func (a *Agent) WithLogger(logger *slog.Logger) *Agent {
@@ -35,63 +49,75 @@ func (a *Agent) WithLogger(logger *slog.Logger) *Agent {
 }
 
 func (a *Agent) Build() *Agent {
-	a.client = openai.NewClient(a.OpenAIKey)
+	a.client = openai.NewClient(a.openAIKey)
+
 	if a.log == nil {
 		a.log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 			Level: slog.LevelDebug,
 		}))
 	}
+
+	if a.threadStore == nil {
+		a.threadStore = NewThreadStoreMemory()
+	}
+
+	if a.maxAutonomousIterations == 0 {
+		a.maxAutonomousIterations = 64
+	}
+
 	return a
 }
 
 func (a *Agent) WithOpenAIKey(key string) *Agent {
-	a.OpenAIKey = key
+	a.openAIKey = key
 	return a
 }
 
 func (a *Agent) WithOpenAIModel(model string) *Agent {
-	a.OpenAIModel = model
+	a.openAIModel = model
 	return a
 }
 
 func (a *Agent) WithSystemPrompt(prompt string) *Agent {
-	a.SystemPrompt = prompt
+	a.systemPrompt = prompt
 	return a
 }
 
 func (a *Agent) WithMaxTokens(tokens int) *Agent {
-	a.MaxTokens = tokens
+	a.maxTokens = tokens
 	return a
 }
 
 func (a *Agent) WithTemperature(temperature float32) *Agent {
-	a.Temperature = temperature
+	a.temperature = temperature
 	return a
 }
 
 func (a *Agent) WithTool(tool *Tool) *Agent {
-	a.Tools = append(a.Tools, *tool)
+	a.tools = append(a.tools, *tool)
 	return a
 }
 
 func (a *Agent) Ask(ctx context.Context, question string) (string, error) {
-	a.ChatHistory = append(a.ChatHistory, openai.ChatCompletionMessage{
+	a.threadStore.AddMessage(openai.ChatCompletionMessage{
 		Role:    openai.ChatMessageRoleUser,
 		Content: question,
 	})
 
-	for i := 0; i < 64; i++ {
-		messages := []openai.ChatCompletionMessage{{
+	for i := 0; i < a.maxAutonomousIterations; i++ {
+		threadWithSystemPrompt := []openai.ChatCompletionMessage{{
 			Role:    openai.ChatMessageRoleSystem,
-			Content: a.SystemPrompt,
+			Content: a.systemPrompt,
 		}}
-		messages = append(messages, a.ChatHistory...)
+
+		thread := a.threadStore.GetSnapshot()
+		threadWithSystemPrompt = append(threadWithSystemPrompt, thread...)
 
 		resp, err := a.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-			Model:       a.OpenAIModel,
-			MaxTokens:   a.MaxTokens,
-			Temperature: a.Temperature,
-			Messages:    messages,
+			Model:       a.openAIModel,
+			MaxTokens:   a.maxTokens,
+			Temperature: a.temperature,
+			Messages:    threadWithSystemPrompt,
 			Functions:   a.getOpenAITools(),
 		})
 		if err != nil {
@@ -104,7 +130,7 @@ func (a *Agent) Ask(ctx context.Context, question string) (string, error) {
 		choice := resp.Choices[0]
 		finishReason := choice.FinishReason
 
-		a.ChatHistory = append(a.ChatHistory, openai.ChatCompletionMessage{
+		a.threadStore.AddMessage(openai.ChatCompletionMessage{
 			Role:         openai.ChatMessageRoleAssistant,
 			Content:      choice.Message.Content,
 			FunctionCall: choice.Message.FunctionCall,
@@ -132,7 +158,7 @@ func (a *Agent) Ask(ctx context.Context, question string) (string, error) {
 		default:
 			text := choice.Message.Content
 			if text != "" {
-				a.ChatHistory = append(a.ChatHistory, openai.ChatCompletionMessage{
+				a.threadStore.AddMessage(openai.ChatCompletionMessage{
 					Role:    openai.ChatMessageRoleAssistant,
 					Content: text,
 				})
@@ -148,7 +174,7 @@ func (a *Agent) Ask(ctx context.Context, question string) (string, error) {
 
 func (a *Agent) getOpenAITools() []openai.FunctionDefinition {
 	var functions []openai.FunctionDefinition
-	for _, tool := range a.Tools {
+	for _, tool := range a.tools {
 		functions = append(functions, openai.FunctionDefinition{
 			Name:        tool.Name,
 			Description: tool.Description,
@@ -163,7 +189,7 @@ func (a *Agent) handleFunctionCall(message openai.ChatCompletionMessage) (string
 		return "", errors.New("no function call in message")
 	}
 
-	for _, tool := range a.Tools {
+	for _, tool := range a.tools {
 		if tool.Name == message.FunctionCall.Name {
 
 			argsJSON := message.FunctionCall.Arguments
@@ -184,7 +210,7 @@ func (a *Agent) handleFunctionCall(message openai.ChatCompletionMessage) (string
 			}
 			response := fmt.Sprintf("Function '%s' result: %s", tool.Name, marshalledResult)
 
-			a.ChatHistory = append(a.ChatHistory, openai.ChatCompletionMessage{
+			a.threadStore.AddMessage(openai.ChatCompletionMessage{
 				Role:    openai.ChatMessageRoleAssistant,
 				Content: response,
 			})

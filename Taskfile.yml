@@ -1,0 +1,8 @@
+version: "3"
+
+tasks:
+  dev:
+    dotenv:
+      - '.env'
+    cmds:
+      - go run cmd/kitchensink/main.go

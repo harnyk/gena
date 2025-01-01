@@ -1,0 +1,30 @@
+# Go binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go workspace files
+*.out
+
+# Dependency directories (can be ignored if already vendored)
+/vendor/
+
+# Build cache
+*.[oO]
+*.a
+
+# Test binary, build cache, and coverage test
+*.test
+
+# IDE and editor-specific files
+.vscode/
+.idea/
+*.iml
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+.env

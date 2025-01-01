@@ -99,10 +99,12 @@ func (a *Agent) WithTool(tool *Tool) *Agent {
 }
 
 func (a *Agent) Ask(ctx context.Context, question string) (string, error) {
-	a.threadStore.AddMessage(openai.ChatCompletionMessage{
+	if err := a.threadStore.AddMessage(openai.ChatCompletionMessage{
 		Role:    openai.ChatMessageRoleUser,
 		Content: question,
-	})
+	}); err != nil {
+		return "", err
+	}
 
 	for i := 0; i < a.maxAutonomousIterations; i++ {
 		threadWithSystemPrompt := []openai.ChatCompletionMessage{{
@@ -110,7 +112,11 @@ func (a *Agent) Ask(ctx context.Context, question string) (string, error) {
 			Content: a.systemPrompt,
 		}}
 
-		thread := a.threadStore.GetSnapshot()
+		thread, err := a.threadStore.GetSnapshot()
+		if err != nil {
+			return "", err
+		}
+
 		threadWithSystemPrompt = append(threadWithSystemPrompt, thread...)
 
 		resp, err := a.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
@@ -130,11 +136,13 @@ func (a *Agent) Ask(ctx context.Context, question string) (string, error) {
 		choice := resp.Choices[0]
 		finishReason := choice.FinishReason
 
-		a.threadStore.AddMessage(openai.ChatCompletionMessage{
+		if err := a.threadStore.AddMessage(openai.ChatCompletionMessage{
 			Role:         openai.ChatMessageRoleAssistant,
 			Content:      choice.Message.Content,
 			FunctionCall: choice.Message.FunctionCall,
-		})
+		}); err != nil {
+			return "", err
+		}
 
 		switch finishReason {
 		case "function_call":
@@ -158,10 +166,12 @@ func (a *Agent) Ask(ctx context.Context, question string) (string, error) {
 		default:
 			text := choice.Message.Content
 			if text != "" {
-				a.threadStore.AddMessage(openai.ChatCompletionMessage{
+				if err := a.threadStore.AddMessage(openai.ChatCompletionMessage{
 					Role:    openai.ChatMessageRoleAssistant,
 					Content: text,
-				})
+				}); err != nil {
+					return "", err
+				}
 				return text, nil
 			} else {
 				return "", nil
@@ -210,10 +220,12 @@ func (a *Agent) handleFunctionCall(message openai.ChatCompletionMessage) (string
 			}
 			response := fmt.Sprintf("Function '%s' result: %s", tool.Name, marshalledResult)
 
-			a.threadStore.AddMessage(openai.ChatCompletionMessage{
+			if err := a.threadStore.AddMessage(openai.ChatCompletionMessage{
 				Role:    openai.ChatMessageRoleAssistant,
 				Content: response,
-			})
+			}); err != nil {
+				return "", err
+			}
 
 			return response, nil
 		}

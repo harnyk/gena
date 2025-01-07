@@ -4,20 +4,19 @@ import (
 	"github.com/mitchellh/mapstructure"
 )
 
-type TypelessHandler func(H) (any, error)
+type TypedExecutor[P any, R any] func(P) (R, error)
 
-type TypedHandler[T any, R any] func(T) (R, error)
+// type UntypedExecutor func(H) (any, error)
 
-func NewTypedHandler[T any, R any](handler TypedHandler[T, R]) TypedHandler[T, R] {
-	return handler
+type ToolHandler interface {
+	Execute(params H) (any, error)
 }
 
-func (t TypedHandler[T, R]) AcceptingMapOfAny() TypelessHandler {
-	return func(params H) (any, error) {
-		var typedParams T
-		if err := mapstructure.Decode(params, &typedParams); err != nil {
-			return nil, err
-		}
-		return t(typedParams)
+func ExecuteTyped[P any, R any](handler TypedExecutor[P, R], params H) (any, error) {
+	var paramsTyped P
+	if err := mapstructure.Decode(params, &paramsTyped); err != nil {
+		return nil, err
 	}
+
+	return handler(paramsTyped)
 }

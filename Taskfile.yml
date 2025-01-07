@@ -5,4 +5,4 @@ tasks:
     dotenv:
       - '.env'
     cmds:
-      - go run cmd/kitchensink/main.go
+      - go run ./cmd/kitchensink/

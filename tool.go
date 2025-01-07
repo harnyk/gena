@@ -2,13 +2,11 @@ package gena
 
 import "errors"
 
-type H map[string]interface{}
-
 type Tool struct {
 	Name        string
 	Description string
 	Schema      H
-	Handler     TypelessHandler
+	Handler     ToolHandler
 }
 
 func NewTool() *Tool {
@@ -30,7 +28,7 @@ func (t *Tool) WithSchema(schema H) *Tool {
 	return t
 }
 
-func (t *Tool) WithHandler(handler TypelessHandler) *Tool {
+func (t *Tool) WithHandler(handler ToolHandler) *Tool {
 	t.Handler = handler
 	return t
 }
@@ -40,7 +38,7 @@ func (t *Tool) Run(params H) (any, error) {
 	if t.Handler == nil {
 		return nil, errors.New("no handler defined for tool")
 	}
-	return t.Handler(params)
+	return t.Handler.Execute(params)
 }
 
 func (t *Tool) String() string {

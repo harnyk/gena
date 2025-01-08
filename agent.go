@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
+	"time"
 
 	"github.com/sashabaranov/go-openai"
 )
@@ -14,6 +16,7 @@ import (
 type Agent struct {
 	openAIKey               string
 	openAIModel             string
+	apiURL                  string
 	systemPrompt            string
 	maxTokens               int
 	temperature             float32
@@ -48,8 +51,17 @@ func (a *Agent) WithLogger(logger *slog.Logger) *Agent {
 	return a
 }
 
+func (a *Agent) WithAPIURL(url string) *Agent {
+	a.apiURL = url
+	return a
+}
+
 func (a *Agent) Build() *Agent {
-	a.client = openai.NewClient(a.openAIKey)
+	config := openai.DefaultConfig(a.openAIKey)
+	if a.apiURL != "" {
+		config.BaseURL = a.apiURL
+	}
+	a.client = openai.NewClientWithConfig(config)
 
 	if a.log == nil {
 		a.log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
@@ -98,6 +110,32 @@ func (a *Agent) WithTool(tool *Tool) *Agent {
 	return a
 }
 
+func (a *Agent) createChatCompletionWithRetryOnRateLimitError(ctx context.Context, request openai.ChatCompletionRequest) (*openai.ChatCompletionResponse, error) {
+	var resp openai.ChatCompletionResponse
+	var err error
+	for i := 0; i < 5; i++ {
+		resp, err = a.client.CreateChatCompletion(ctx, request)
+		if err == nil {
+			return &resp, nil
+		}
+		if a.isRateLimitError(err) {
+			a.log.Warn("rate limit error, retrying after 5 seconds")
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		return nil, err
+	}
+	return nil, err
+}
+
+func (a *Agent) isRateLimitError(err error) bool {
+	openaiErr, ok := err.(*openai.RequestError)
+	if !ok {
+		return false
+	}
+	return openaiErr.HTTPStatusCode == http.StatusTooManyRequests
+}
+
 func (a *Agent) Ask(ctx context.Context, question string) (string, error) {
 	if err := a.threadStore.AddMessage(openai.ChatCompletionMessage{
 		Role:    openai.ChatMessageRoleUser,
@@ -119,12 +157,13 @@ func (a *Agent) Ask(ctx context.Context, question string) (string, error) {
 
 		threadWithSystemPrompt = append(threadWithSystemPrompt, thread...)
 
-		resp, err := a.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
+		resp, err := a.createChatCompletionWithRetryOnRateLimitError(ctx, openai.ChatCompletionRequest{
 			Model:       a.openAIModel,
 			MaxTokens:   a.maxTokens,
 			Temperature: a.temperature,
 			Messages:    threadWithSystemPrompt,
-			Functions:   a.getOpenAITools(),
+			// Functions:   a.getOpenAITools(),
+			Tools: a.getOpenAITools(),
 		})
 		if err != nil {
 			return "", err
@@ -140,17 +179,28 @@ func (a *Agent) Ask(ctx context.Context, question string) (string, error) {
 			Role:         openai.ChatMessageRoleAssistant,
 			Content:      choice.Message.Content,
 			FunctionCall: choice.Message.FunctionCall,
+			ToolCalls:    choice.Message.ToolCalls,
 		}); err != nil {
 			return "", err
 		}
 
 		switch finishReason {
+		case "tool_calls":
+			toolCalls := choice.Message.ToolCalls
+			a.log.Debug("tool calls",
+				"count", len(toolCalls),
+			)
+			err := a.handleToolCalls(toolCalls)
+			if err != nil {
+				return "", err
+			}
+			continue
 		case "function_call":
-			a.log.Debug("tool call",
+			a.log.Debug("function call",
 				"tool", choice.Message.FunctionCall.Name,
 				"args", choice.Message.FunctionCall.Arguments,
 			)
-			callResult, err := a.handleFunctionCall(choice.Message)
+			callResult, err := a.handleFunctionCall(choice.Message.FunctionCall)
 			if err != nil {
 				return "", err
 			}
@@ -182,27 +232,88 @@ func (a *Agent) Ask(ctx context.Context, question string) (string, error) {
 	return "", errors.New("too many iterations without a final answer")
 }
 
-func (a *Agent) getOpenAITools() []openai.FunctionDefinition {
-	var functions []openai.FunctionDefinition
+func (a *Agent) getOpenAITools() []openai.Tool {
+	var functions []openai.Tool
 	for _, tool := range a.tools {
-		functions = append(functions, openai.FunctionDefinition{
-			Name:        tool.Name,
-			Description: tool.Description,
-			Parameters:  tool.Schema,
+		functions = append(functions, openai.Tool{
+			Type: "function",
+			Function: &openai.FunctionDefinition{
+				Name:        tool.Name,
+				Description: tool.Description,
+				Parameters:  tool.Schema,
+			},
 		})
 	}
 	return functions
 }
 
-func (a *Agent) handleFunctionCall(message openai.ChatCompletionMessage) (string, error) {
-	if message.FunctionCall == nil {
+func (a *Agent) toolByName(name string) *Tool {
+	for _, tool := range a.tools {
+		if tool.Name == name {
+			return &tool
+		}
+	}
+	return nil
+}
+
+func (a *Agent) handleToolCalls(toolCalls []openai.ToolCall) error {
+	for _, toolCall := range toolCalls {
+		a.log.Debug("tool call",
+			"tool", toolCall.Function.Name,
+			"args", toolCall.Function.Arguments,
+		)
+
+		tool := a.toolByName(toolCall.Function.Name)
+		if tool == nil {
+			return errors.New("tool not found")
+		}
+
+		argumentsStr := toolCall.Function.Arguments
+
+		var argumentsMap H
+		if err := json.Unmarshal([]byte(argumentsStr), &argumentsMap); err != nil {
+			return fmt.Errorf("failed to unmarshal tool call arguments: %w", err)
+		}
+
+		result, err := tool.Run(argumentsMap)
+		if err != nil {
+			result = fmt.Sprintf("error: %s", err.Error())
+		}
+
+		marshalledResult, err := json.Marshal(result)
+		if err != nil {
+			return fmt.Errorf("failed to marshal tool call result: %w", err)
+		}
+
+		a.log.Debug("tool call result",
+			"tool", tool.Name,
+			"result", string(marshalledResult),
+		)
+
+		toolReplyMessage := openai.ChatCompletionMessage{
+			Role:       openai.ChatMessageRoleTool,
+			Name:       tool.Name,
+			ToolCallID: toolCall.ID,
+			Content:    string(marshalledResult),
+		}
+
+		if err := a.threadStore.AddMessage(toolReplyMessage); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (a *Agent) handleFunctionCall(functionCall *openai.FunctionCall) (string, error) {
+	if functionCall == nil {
 		return "", errors.New("no function call in message")
 	}
 
 	for _, tool := range a.tools {
-		if tool.Name == message.FunctionCall.Name {
+		if tool.Name == functionCall.Name {
 
-			argsJSON := message.FunctionCall.Arguments
+			argsJSON := functionCall.Arguments
 
 			var argsMap map[string]interface{}
 			if err := json.Unmarshal([]byte(argsJSON), &argsMap); err != nil {
@@ -221,7 +332,7 @@ func (a *Agent) handleFunctionCall(message openai.ChatCompletionMessage) (string
 			response := fmt.Sprintf("Function '%s' result: %s", tool.Name, marshalledResult)
 
 			if err := a.threadStore.AddMessage(openai.ChatCompletionMessage{
-				Role:    openai.ChatMessageRoleAssistant,
+				Role:    openai.ChatMessageRoleUser,
 				Content: response,
 			}); err != nil {
 				return "", err
@@ -231,5 +342,5 @@ func (a *Agent) handleFunctionCall(message openai.ChatCompletionMessage) (string
 		}
 	}
 
-	return "", fmt.Errorf("tool not found: %s", message.FunctionCall.Name)
+	return "", fmt.Errorf("tool not found: %s", functionCall.Name)
 }

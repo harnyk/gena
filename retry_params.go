@@ -25,7 +25,7 @@ func (r retryParams) GetInitialDelay() time.Duration {
 
 func (r retryParams) GetDelayFactor() float64 {
 	if r.delayFactor == 0.0 {
-		return 1.5
+		return 2
 	}
 	return r.delayFactor
 }

@@ -110,21 +110,36 @@ func (a *Agent) WithTool(tool *Tool) *Agent {
 	return a
 }
 
-func (a *Agent) createChatCompletionWithRetryOnRateLimitError(ctx context.Context, request openai.ChatCompletionRequest) (*openai.ChatCompletionResponse, error) {
+func (a *Agent) createChatCompletionWithRetryOnRateLimitError(
+	ctx context.Context,
+	request openai.ChatCompletionRequest,
+	rParams retryParams,
+) (*openai.ChatCompletionResponse, error) {
 	var resp openai.ChatCompletionResponse
 	var err error
-	for i := 0; i < 5; i++ {
+
+	initialDelay := rParams.GetInitialDelay()
+	delayFactor := rParams.GetDelayFactor()
+	maxDelay := rParams.GetMaxDelay()
+	currentDelay := initialDelay
+
+	for i := 0; i < rParams.GetMaxRetries(); i++ {
 		resp, err = a.client.CreateChatCompletion(ctx, request)
 		if err == nil {
 			return &resp, nil
 		}
 		if a.isRateLimitError(err) {
-			a.log.Warn("rate limit error, retrying after 5 seconds")
-			time.Sleep(5 * time.Second)
+			a.log.Warn(fmt.Sprintf("rate limit error, retrying after %s", currentDelay))
+			time.Sleep(currentDelay)
+			currentDelay *= time.Duration(delayFactor)
+			if currentDelay > maxDelay {
+				currentDelay = maxDelay
+			}
 			continue
 		}
 		return nil, err
 	}
+	a.log.Error("all retries failed")
 	return nil, err
 }
 
@@ -157,14 +172,18 @@ func (a *Agent) Ask(ctx context.Context, question string) (string, error) {
 
 		threadWithSystemPrompt = append(threadWithSystemPrompt, thread...)
 
-		resp, err := a.createChatCompletionWithRetryOnRateLimitError(ctx, openai.ChatCompletionRequest{
-			Model:       a.openAIModel,
-			MaxTokens:   a.maxTokens,
-			Temperature: a.temperature,
-			Messages:    threadWithSystemPrompt,
-			// Functions:   a.getOpenAITools(),
-			Tools: a.getOpenAITools(),
-		})
+		resp, err := a.createChatCompletionWithRetryOnRateLimitError(
+			ctx,
+			openai.ChatCompletionRequest{
+				Model:       a.openAIModel,
+				MaxTokens:   a.maxTokens,
+				Temperature: a.temperature,
+				Messages:    threadWithSystemPrompt,
+				// Functions:   a.getOpenAITools(),
+				Tools: a.getOpenAITools(),
+			},
+			retryParams{},
+		)
 		if err != nil {
 			return "", err
 		}

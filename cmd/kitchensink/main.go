@@ -32,6 +32,7 @@ func main() {
 		WithName("square_root").
 		WithDescription("Returns the square root of a number").
 		WithHandler(NewSquareRootHandler()).
+		WithMiddleware(NewDemoMiddleware()).
 		WithSchema(H{
 			"type":       "object",
 			"properties": H{"x": H{"type": "number"}},
@@ -39,9 +40,9 @@ func main() {
 
 	agent := gena.NewAgent().
 		WithOpenAIKey(openaiKey).
-		WithOpenAIModel("gpt-4o-mini").
-		// WithAPIURL("https://api.mistral.ai/v1").
-		// WithOpenAIModel("mistral-large-latest").
+		// WithOpenAIModel("gpt-4o-mini").
+		WithAPIURL("https://api.mistral.ai/v1").
+		WithOpenAIModel("mistral-large-latest").
 		WithSystemPrompt(prompt).
 		WithTemperature(0.5).
 		WithTool(currentTimeTool).

@@ -152,6 +152,10 @@ func (a *Agent) isRateLimitError(err error) bool {
 }
 
 func (a *Agent) Ask(ctx context.Context, question string) (string, error) {
+	return a.AskWithOptions(ctx, question, AskOptions{})
+}
+
+func (a *Agent) AskWithOptions(ctx context.Context, question string, options AskOptions) (string, error) {
 	if err := a.threadStore.AddMessage(openai.ChatCompletionMessage{
 		Role:    openai.ChatMessageRoleUser,
 		Content: question,
@@ -159,10 +163,18 @@ func (a *Agent) Ask(ctx context.Context, question string) (string, error) {
 		return "", err
 	}
 
-	for i := 0; i < a.maxAutonomousIterations; i++ {
+	for range a.maxAutonomousIterations {
+		var systemPrompt string
+
+		if options.SystemPrompt != "" {
+			systemPrompt = options.SystemPrompt
+		} else {
+			systemPrompt = a.systemPrompt
+		}
+
 		threadWithSystemPrompt := []openai.ChatCompletionMessage{{
 			Role:    openai.ChatMessageRoleSystem,
-			Content: a.systemPrompt,
+			Content: systemPrompt,
 		}}
 
 		thread, err := a.threadStore.GetSnapshot()
